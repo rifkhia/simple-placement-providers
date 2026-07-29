@@ -1,0 +1,16 @@
+node_modules
+dist
+
+# `COPY . .` would otherwise bake credentials into an image layer. Runtime
+# config is supplied by compose `env_file` on the host, never at build time.
+.env
+.env.*
+
+*.log
+.DS_Store
+.git
+.github
+.idea
+README.md
+docker-compose*.yml
+nginx*.conf
