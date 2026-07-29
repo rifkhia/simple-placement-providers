@@ -1,0 +1,11 @@
+node_modules/
+dist/
+
+# Env files hold the gateway URL and Basic Auth credentials — never commit them
+.env
+.env.*
+!.env.example
+
+*.local
+.DS_Store
+.idea/

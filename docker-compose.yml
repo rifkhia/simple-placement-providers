@@ -1,0 +1,22 @@
+services:
+  test:
+    build:
+      context: .
+      args:
+        VITE_BASE_PATH: /test
+    ports:
+      - "3001:4173"
+    env_file:
+      - .env.test
+    restart: unless-stopped
+
+  prod:
+    build:
+      context: .
+      args:
+        VITE_BASE_PATH: /prod
+    ports:
+      - "3002:4173"
+    env_file:
+      - .env.prod
+    restart: unless-stopped
