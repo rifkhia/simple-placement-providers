@@ -14,11 +14,10 @@
       </button>
     </div>
 
-    <!-- Filters -->
     <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4 mb-4 flex flex-wrap gap-3 items-end">
       <div class="flex-1 min-w-48">
         <label class="label">Search by name</label>
-        <input v-model="filters.name" class="input" placeholder="e.g. production" @keyup.enter="search" />
+        <input v-model="filters.name" class="input" placeholder="e.g. sandbox" />
       </div>
       <div>
         <label class="label">Visible on UI</label>
@@ -29,7 +28,6 @@
         </select>
       </div>
       <div class="flex gap-2">
-        <button class="btn-primary btn" @click="search">Search</button>
         <button class="btn-ghost btn" @click="clearFilters">Clear</button>
       </div>
     </div>
@@ -134,8 +132,8 @@
       <div v-if="totalPages > 1" class="px-5 py-3 border-t border-gray-100 flex items-center justify-between">
         <span class="text-xs text-gray-400">Page {{ page }} of {{ totalPages }}</span>
         <div class="flex gap-1.5">
-          <button class="btn-ghost btn btn-sm" :disabled="page <= 1" @click="page--; load()">← Prev</button>
-          <button class="btn-ghost btn btn-sm" :disabled="page >= totalPages" @click="page++; load()">Next →</button>
+          <button class="btn-ghost btn btn-sm" :disabled="page <= 1" @click="page--">← Prev</button>
+          <button class="btn-ghost btn btn-sm" :disabled="page >= totalPages" @click="page++">Next →</button>
         </div>
       </div>
     </div>
@@ -263,21 +261,20 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { getPlacements, createPlacement, updatePlacement, deletePlacement } from '../api/placements.js'
 import { getProviders } from '../api/providers.js'
 import JsonSchemaForm from '../components/JsonSchemaForm.vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
 
 // --- State ---
-const placements = ref([])
+// The whole placement list, fetched once; filtering and paging are derived from it.
+const allPlacements = ref([])
 const providers = ref([])
 const loading = ref(false)
 const error = ref('')
-const total = ref(0)
 const page = ref(1)
 const pageSize = 20
-const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
 const filters = ref({ name: '', visible_on_ui: '' })
 const toast = ref('')
@@ -292,6 +289,28 @@ const modalError = ref('')
 const deleteTarget = ref(null)
 
 // --- Computed ---
+// Case-insensitive "contains" match on the name, so typing "int" finds "Internal".
+const filtered = computed(() => {
+  const term = filters.value.name.trim().toLowerCase()
+  const visible = filters.value.visible_on_ui
+  return allPlacements.value.filter(p => {
+    if (term && !(p.name ?? '').toLowerCase().includes(term)) return false
+    if (visible !== '' && String(p.visible_on_ui) !== visible) return false
+    return true
+  })
+})
+
+const total = computed(() => filtered.value.length)
+const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
+const placements = computed(() => {
+  const start = (page.value - 1) * pageSize
+  return filtered.value.slice(start, start + pageSize)
+})
+
+// Typing a new search starts over at page 1; a shrinking list clamps the page
+watch(filters, () => { page.value = 1 }, { deep: true })
+watch(totalPages, max => { if (page.value > max) page.value = max })
+
 const selectedProvider = computed(() =>
   providers.value.find(p => p.id === form.value.provider_id) ?? null
 )
@@ -321,30 +340,11 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    // The API's `name` param matches exactly, so for a "contains" search we
-    // pull the whole list and filter + paginate client-side instead.
-    const search = filters.value.name.trim().toLowerCase()
-    const params = search
-      ? { page: 1, page_size: -1 }
-      : { page: page.value, page_size: pageSize }
-    if (filters.value.visible_on_ui !== '') params.visible_on_ui = filters.value.visible_on_ui
-    const res = await getPlacements(params)
+    // The backend's `name` param matches exactly, so we pull the full list once
+    // and do the "contains" search + paging client-side (see `filtered`).
+    const res = await getPlacements({ page: 1, page_size: -1 })
     const items = res?.data?.items ?? res?.data ?? []
-    let list = Array.isArray(items) ? [...items].sort((a, b) => a.id - b.id) : []
-
-    if (search) {
-      list = list.filter(p => (p.name ?? '').toLowerCase().includes(search))
-      total.value = list.length
-      // Clamp the page in case the match count shrank below the current page
-      const maxPage = Math.max(1, Math.ceil(list.length / pageSize))
-      if (page.value > maxPage) page.value = maxPage
-      const start = (page.value - 1) * pageSize
-      list = list.slice(start, start + pageSize)
-    } else {
-      total.value = res?.data?.total ?? list.length
-    }
-
-    placements.value = list
+    allPlacements.value = Array.isArray(items) ? [...items].sort((a, b) => a.id - b.id) : []
   } catch (e) {
     error.value = e.message
   } finally {
@@ -352,15 +352,9 @@ async function load() {
   }
 }
 
-function search() {
-  page.value = 1
-  load()
-}
-
 function clearFilters() {
   filters.value = { name: '', visible_on_ui: '' }
   page.value = 1
-  load()
 }
 
 // --- Modal ---
