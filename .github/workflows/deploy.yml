@@ -1,14 +1,12 @@
-name: Deploy
+name: Build & Publish
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-# Don't let two deploys race on the VM; cancel-in-progress is off so an
-# in-flight deploy finishes rather than leaving compose half-updated.
 concurrency:
-  group: deploy-main
+  group: publish-main
   cancel-in-progress: false
 
 env:
@@ -24,9 +22,6 @@ jobs:
     strategy:
       matrix:
         include:
-          # VITE_BASE_PATH is baked in at build time, so each environment needs
-          # its own image. Runtime config (API URL, credentials) is NOT in the
-          # image — it comes from .env.test / .env.prod on the VM.
           - env: test
             base_path: /test
           - env: prod
@@ -34,7 +29,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # GHCR requires a lowercase image path; github.repository may not be.
       - name: Resolve image name
         id: image
         run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
@@ -54,54 +48,20 @@ jobs:
           push: true
           build-args: |
             VITE_BASE_PATH=${{ matrix.base_path }}
-          # <env>-latest is what the VM pulls by default; <env>-<sha> is the
-          # immutable tag to pin to when rolling back.
           tags: |
             ${{ steps.image.outputs.name }}:${{ matrix.env }}-latest
             ${{ steps.image.outputs.name }}:${{ matrix.env }}-${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.env }}
           cache-to: type=gha,mode=max,scope=${{ matrix.env }}
 
-  deploy:
-    name: Deploy to VM
-    needs: build
-    runs-on: ubuntu-latest
-    # Requires a "production" environment in repo settings; add required
-    # reviewers there to gate deploys, or remove this line to always deploy.
-    environment: production
-    steps:
-      - name: Resolve image name
-        id: image
-        run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-
-      # Third-party action — consider pinning to a commit SHA rather than a tag.
-      - name: docker compose pull && up
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
-          script_stops: true
-          envs: IMAGE_REPO,IMAGE_TAG,DEPLOY_PATH,GHCR_USER,GHCR_TOKEN
-          script: |
-            set -euo pipefail
-            cd "${DEPLOY_PATH:?DEPLOY_PATH repo variable is not set}"
-
-            # Only needed while the GHCR package is private. Make the package
-            # public and you can drop this line and the GHCR_PULL_TOKEN secret.
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-
-            # Interpolated into docker-compose.deploy.yml
-            export IMAGE_REPO IMAGE_TAG
-
-            docker compose -f docker-compose.deploy.yml pull
-            docker compose -f docker-compose.deploy.yml up -d --remove-orphans
-            docker compose -f docker-compose.deploy.yml ps
-            docker image prune -f
-        env:
-          IMAGE_REPO: ${{ steps.image.outputs.name }}
-          IMAGE_TAG: ${{ github.sha }}
-          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
-          GHCR_USER: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+      - name: Summary
+        run: |
+          {
+            echo "### Pushed \`${{ matrix.env }}\`"
+            echo ""
+            echo '- `${{ steps.image.outputs.name }}:${{ matrix.env }}-latest`'
+            echo '- `${{ steps.image.outputs.name }}:${{ matrix.env }}-${{ github.sha }}`'
+            echo ""
+            echo "Watchtower on the VM polls \`${{ matrix.env }}-latest\` every 120s and"
+            echo "recreates the container — expect it live within ~2 minutes."
+          } >> "$GITHUB_STEP_SUMMARY"

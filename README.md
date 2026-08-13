@@ -18,7 +18,7 @@ baked into the browser bundle.
 | HTTP | axios |
 | Styling | Tailwind CSS |
 | Build | Vite 5 |
-| Deploy | Docker + nginx |
+| Deploy | Podman Compose on a VM, built from source |
 
 ## Getting started
 
@@ -89,98 +89,150 @@ Changing the provider resets `provider_resources`, since the schema changed.
 
 ### Placement search
 
-The backend matches the `name` query param **exactly**. To make the search box
-behave like a "contains" filter, `PlacementsView.load()` omits `name` when a
-search term is present, requests the full list (`page_size: -1`), and filters
-case-insensitively client-side, paginating the matches locally. With an empty
-search box it falls back to normal server-side pagination.
+The backend matches the `name` query param **exactly**, so the search box doesn't
+use it. `PlacementsView.load()` fetches the full list once (`page_size: -1`) into
+`allPlacements`, and the `filtered` computed does a case-insensitive "contains"
+match on the name plus the `visible_on_ui` filter. Results update as you type —
+no Search button — and paging slices `filtered` locally.
 
-This means a search fetches every placement. Fine at the current data size; if
-the table grows large, add a partial-match param (e.g. `name_like`) to the
-backend and move the filtering back server-side.
+This means the view always fetches every placement. Fine at the current data
+size; if the table grows large, add a partial-match param (e.g. `name_like`) to
+the backend and move the filtering and paging back server-side.
 
-## Docker
+## Deployment
 
-Two environments run side by side, each with its own path prefix and env file:
+The VM is behind the corporate VPN, so **GitHub can't reach in** — no SSH deploy
+step, no webhook. Only outbound traffic works (`ghcr.io` and `github.com` are both
+reachable from the VM), so deployment is **pull-based**:
 
-| Service | Host port | Path prefix | Env file | Image tag |
-|---|---|---|---|---|
-| `test` | 3001 | `/test` | `.env.test` | `:test-latest` |
-| `prod` | 3002 | `/prod` | `.env.prod` | `:prod-latest` |
-
-`VITE_BASE_PATH` is a build ARG, so **test and prod are different images** — the
-prefix is compiled into the bundle. Everything else (API URL, credentials) is
-read at runtime by the preview proxy, so images contain no secrets.
-
-To build and run locally:
-
-```bash
-docker compose up -d --build          # docker-compose.yml — builds from source
+```
+push to main → Actions builds both images → GHCR (:test-latest, :prod-latest)
+             → Watchtower on the VM polls every 120s → recreates the containers
 ```
 
-`nginx-vm.conf` is a sample reverse-proxy config for a VM fronting both
-containers — set `server_name` to your hostname and drop it in
-`/etc/nginx/conf.d/`. `nginx.conf` is the in-image config for a static nginx
-variant, if you'd rather not serve via `vite preview`.
+The VM runs **Podman** (rootful) with compose. Three containers, from
+`docker-compose.deploy.yml`:
 
-Because the containers run `vite preview`, `VITE_ALLOWED_HOST` must be set to
-the public hostname in each env file, or the preview server rejects the
-proxied requests.
+| Service | Container | Host port | Path prefix | Env file |
+|---|---|---|---|---|
+| `test` | `simple-placement-providers-test-1` | 3001 | `/test` | `.env.test` |
+| `prod` | `simple-placement-providers-prod-1` | 3002 | `/prod` | `.env.prod` |
+| `watchtower` | `simple-placement-providers-watchtower-1` | — | — | — |
 
-## CI/CD
+`VITE_BASE_PATH` is a build ARG, so **test and prod are different images** — the
+prefix is compiled into the bundle. Everything else (API URL, Basic Auth
+credentials, `VITE_ALLOWED_HOST`) is read at runtime from the env file, so the
+images themselves contain no secrets.
 
-`.github/workflows/deploy.yml` runs on every push to `main` (and via
-**workflow_dispatch**):
-
-1. **build** — a 2-job matrix builds the `test` and `prod` images with the right
-   `VITE_BASE_PATH` and pushes each to GHCR as `<env>-latest` plus an immutable
-   `<env>-<sha>`. Layer caching is scoped per environment.
-2. **deploy** — SSHes into the VM via `appleboy/ssh-action` and runs
-   `docker compose pull && docker compose up -d` against
-   `docker-compose.deploy.yml`.
-
-The deploy job targets a `production` GitHub environment, so you can require a
-manual approval in repo settings; remove the `environment:` line to deploy
-unattended.
-
-### Required secrets and variables
-
-Repo → Settings → Secrets and variables → Actions.
-
-| Name | Kind | Description |
-|---|---|---|
-| `SSH_HOST` | secret | VM hostname or IP |
-| `SSH_USER` | secret | SSH user, must be in the `docker` group |
-| `SSH_KEY` | secret | Private key (full PEM, including header/footer) |
-| `SSH_PORT` | secret | Optional, defaults to 22 |
-| `GHCR_PULL_TOKEN` | secret | PAT with `read:packages`, for the VM's `docker login`. Not needed if you make the GHCR package public |
-| `DEPLOY_PATH` | variable | Directory on the VM holding the compose and env files, e.g. `/opt/placements` |
-
-`GITHUB_TOKEN` handles the push side automatically — no secret needed for that.
+`docker-compose.yml` still builds from source, for local runs. The VM uses
+`docker-compose.deploy.yml`, which pulls from GHCR instead — don't run the deploy
+file with `--build`.
 
 ### One-time VM setup
 
-The VM needs Docker with the Compose plugin, and this in `$DEPLOY_PATH`:
-
-```
-docker-compose.deploy.yml     # copied from this repo
-.env.test                     # real values — never committed
-.env.prod                     # real values — never committed
-```
-
-`docker-compose.deploy.yml` has no `build:` section; it only pulls. Keep it in
-sync by hand when it changes, or add an `appleboy/scp-action` step to the
-workflow to copy it up on each deploy.
-
-### Rollback
-
-Images are tagged with the commit SHA, so pin and redeploy:
+The GHCR package is **public**, so nothing needs to authenticate to pull it. The
+images hold only the built frontend bundle — API URL and Basic Auth credentials come
+from the env files at container start, so they aren't in the image.
 
 ```bash
-cd $DEPLOY_PATH
-IMAGE_REPO=ghcr.io/<owner>/<repo> IMAGE_TAG=<good-sha> \
-  docker compose -f docker-compose.deploy.yml up -d
+# 1. Containers use restart: unless-stopped, which only survives a reboot if this
+#    is enabled. podman.socket is what Watchtower talks to.
+systemctl enable --now podman-restart.service podman.socket
+
+# 2. Deploy.
+mkdir -p /opt/simple-placement-providers
+cd /opt/simple-placement-providers          # copy the compose + env files here
+docker-compose -f docker-compose.deploy.yml up -d
 ```
+
+If you ever make the package private, both the podman pull path and Watchtower need
+a classic PAT scoped to `read:packages`:
+
+```bash
+# --authfile matters: podman's default root auth path is /run/containers/0/auth.json
+# on tmpfs, so it would be lost on reboot.
+podman login --authfile /root/.docker/config.json ghcr.io -u <github-user>
+
+# Watchtower reads /config.json — give it its own file so it never sees the other
+# registry logins in /root/.docker/config.json, then uncomment the mount in
+# docker-compose.deploy.yml.
+mkdir -p /etc/watchtower
+printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' \
+  "$(printf '%s:%s' '<github-user>' '<PAT>' | base64 -w0)" > /etc/watchtower/config.json
+chmod 600 /etc/watchtower/config.json
+```
+
+Keep the directory named `simple-placement-providers`. Compose derives the
+project name from it, and that name is what ties the command to the existing
+containers — rename the directory and you get a second, duplicate stack fighting
+for ports 3001/3002.
+
+> **Don't deploy from `/tmp`.** `systemd-tmpfiles` clears it periodically, which
+> takes the compose file and both env files with it. This already happened once.
+> Use `/opt` or `/srv`.
+
+Watchtower needs `/run/podman/podman.sock` (podman's Docker-compatible API,
+provided by `podman.socket`) and runs label-enabled: it only updates containers
+carrying `com.centurylinklabs.watchtower.enable=true`, so other stacks on the VM
+are left alone. `WATCHTOWER_CLEANUP=true` deletes each superseded image, which
+matters — the VM's root filesystem is small, and `podman image prune` is worth
+running if it fills up.
+
+### Env files on the VM
+
+`.env.test` and `.env.prod` sit next to the compose file and are gitignored. Each
+needs:
+
+```
+VITE_API_BASE_URL=https://<gateway-host>/<api-path>
+VITE_BACKEND_USER=<user>
+VITE_BACKEND_PASSWORD=<password>
+VITE_ALLOWED_HOST=<public hostname of this VM>
+```
+
+`VITE_ALLOWED_HOST` matters: the containers serve via `vite preview`, which
+rejects requests whose `Host` header it doesn't recognise when behind a proxy.
+
+If you ever lose these, `podman inspect <container> --format '{{json .Config.Env}}'`
+shows the live values of a running container.
+
+### Reverse proxy
+
+`nginx-vm.conf` is a sample config for the host fronting both containers — set
+`server_name`, then drop it in `/etc/nginx/conf.d/`. `nginx.conf` is the in-image
+config for a static nginx variant, if you'd rather not serve via `vite preview`.
+
+### Updating a deployment
+
+Push to `main` — that's it. Both environments track `main`, so a merge updates
+`/prod` too. To watch it land:
+
+```bash
+podman logs -f simple-placement-providers-watchtower-1
+podman inspect simple-placement-providers-test-1 --format '{{.ImageName}} {{.Created}}'
+```
+
+To force it immediately instead of waiting out the poll interval, or after
+changing only `.env.test` / `.env.prod` (read at container start, not baked into
+the image):
+
+```bash
+cd /opt/simple-placement-providers
+docker-compose -f docker-compose.deploy.yml up -d
+```
+
+To roll back, deploy the immutable tag the workflow also pushed —
+`ghcr.io/<owner>/simple-placement-providers:prod-<sha>` — or revert the commit.
+
+## CI
+
+`.github/workflows/deploy.yml` builds both images on a GitHub-hosted runner on
+every push to `main` (and via **workflow_dispatch**) and pushes them to GHCR as
+`<env>-latest` plus an immutable `<env>-<sha>`. `GITHUB_TOKEN` authenticates the
+push, so no secrets need configuring on the GitHub side.
+
+The workflow never touches the VM — nothing can reach it inbound through the VPN.
+Handoff is the `<env>-latest` tag: the workflow moves it, Watchtower notices.
 
 ## Notes and limitations
 
