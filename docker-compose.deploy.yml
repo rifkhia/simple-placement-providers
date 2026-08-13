@@ -1,25 +1,58 @@
-# Deployment compose file — lives on the VM, pulls prebuilt images from GHCR.
-# No `build:` section: images come from the Deploy workflow.
+# Deployment compose file for the VM — runs the images published by
+# .github/workflows/deploy.yml, and lets Watchtower keep them up to date.
 #
-# IMAGE_REPO is exported by the deploy workflow (e.g. ghcr.io/owner/repo).
-# IMAGE_TAG defaults to `latest`; set it to a commit SHA to pin or roll back:
-#   IMAGE_TAG=<sha> docker compose -f docker-compose.deploy.yml up -d
+#   cd /opt/simple-placement-providers
+#   docker-compose -f docker-compose.deploy.yml up -d
 #
-# .env.test and .env.prod must exist alongside this file — they hold the API
-# URL and Basic Auth credentials and are deliberately not in the repo.
+# Keep the directory named `simple-placement-providers`: compose derives the
+# project name from it, and the running containers
+# (simple-placement-providers-prod-1, ...-test-1) are matched by that name.
+#
+# Requires .env.test and .env.prod alongside this file, plus GHCR pull
+# credentials — see the Deployment section of the README. The env files hold
+# VITE_API_BASE_URL, VITE_BACKEND_USER, VITE_BACKEND_PASSWORD and
+# VITE_ALLOWED_HOST, and are deliberately not in the repo.
+#
+# VITE_BASE_PATH is baked into the bundle at build time, which is why test and
+# prod are separate images rather than one image driven by runtime env.
 services:
   test:
-    image: ${IMAGE_REPO:?IMAGE_REPO is not set}:test-${IMAGE_TAG:-latest}
+    image: ghcr.io/rifkhia/simple-placement-providers:test-latest
+    pull_policy: always
     ports:
       - "3001:4173"
     env_file:
       - .env.test
     restart: unless-stopped
+    labels:
+      # Watchtower runs label-enabled, so only these two are ever touched
+      com.centurylinklabs.watchtower.enable: "true"
 
   prod:
-    image: ${IMAGE_REPO:?IMAGE_REPO is not set}:prod-${IMAGE_TAG:-latest}
+    image: ghcr.io/rifkhia/simple-placement-providers:prod-latest
+    pull_policy: always
     ports:
       - "3002:4173"
     env_file:
       - .env.prod
     restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+
+  # Polls GHCR and recreates the two containers above when a new image lands.
+  # This is how deployment works at all: the VM is behind the VPN, so GitHub
+  # cannot reach in — the VM has to pull.
+  watchtower:
+    image: docker.io/containrrr/watchtower:1.7.1
+    restart: unless-stopped
+    volumes:
+      # Rootful podman's Docker-compatible API — how Watchtower drives podman
+      - /run/podman/podman.sock:/var/run/docker.sock
+      # The GHCR package is public, so no pull credentials are needed. If you ever
+      # make it private, add a read:packages PAT here — see the README:
+      #   - /etc/watchtower/config.json:/config.json:ro
+    environment:
+      WATCHTOWER_LABEL_ENABLE: "true"   # leave composer / stand-debugger alone
+      WATCHTOWER_CLEANUP: "true"        # drop the superseded image — disk is tight
+      WATCHTOWER_POLL_INTERVAL: "120"
+      WATCHTOWER_INCLUDE_STOPPED: "false"
