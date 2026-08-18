@@ -16,8 +16,57 @@
               <JsonSchemaForm
                 :schema="propSchema"
                 :modelValue="modelValue[key] || {}"
+                :depth="depth + 1"
                 @update:modelValue="update(key, $event)"
               />
+            </div>
+          </div>
+        </template>
+
+        <!-- Array → a repeatable list of item editors -->
+        <template v-else-if="propSchema.type === 'array'">
+          <div class="rounded-lg border border-gray-200 overflow-hidden">
+            <div class="flex items-center gap-2 px-3 py-2 bg-gray-50 border-b border-gray-200">
+              <span class="text-xs font-semibold text-gray-600 uppercase tracking-wide">{{ key }}</span>
+              <span v-if="isRequired(key)" class="text-red-500 text-xs">*</span>
+              <span class="text-xs text-gray-400">(list of {{ propSchema.items?.type || 'any' }})</span>
+            </div>
+            <div class="p-3 space-y-2">
+              <p v-if="propSchema.description" class="text-xs text-gray-400">{{ propSchema.description }}</p>
+              <p v-if="!items(key).length" class="text-xs text-gray-400">No entries yet.</p>
+
+              <div v-for="(item, idx) in items(key)" :key="idx" class="flex items-start gap-2">
+                <div class="flex-1">
+                  <!-- Object items recurse; scalars get a single input -->
+                  <JsonSchemaForm
+                    v-if="propSchema.items?.type === 'object' && propSchema.items?.properties"
+                    :schema="propSchema.items"
+                    :modelValue="item || {}"
+                    :depth="depth + 1"
+                    @update:modelValue="setItem(key, idx, $event)"
+                  />
+                  <input
+                    v-else
+                    :type="propSchema.items?.type === 'integer' || propSchema.items?.type === 'number' ? 'number' : 'text'"
+                    :value="item"
+                    @input="setItem(key, idx, coerce(propSchema.items, $event.target.value))"
+                    class="input"
+                    :placeholder="`${key} #${idx + 1}`"
+                  />
+                </div>
+                <button
+                  class="btn btn-sm px-2 text-red-500 hover:bg-red-50 focus:ring-red-400"
+                  title="Remove entry"
+                  @click="removeItem(key, idx)"
+                >✕</button>
+              </div>
+
+              <button class="btn-ghost btn btn-sm" @click="addItem(key, propSchema.items)">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                </svg>
+                Add {{ key }}
+              </button>
             </div>
           </div>
         </template>
@@ -59,7 +108,7 @@
             v-else-if="propSchema.type === 'number' || propSchema.type === 'integer'"
             type="number"
             :value="modelValue[key]"
-            @input="update(key, propSchema.type === 'integer' ? parseInt($event.target.value) : parseFloat($event.target.value))"
+            @input="update(key, coerce(propSchema, $event.target.value))"
             :required="isRequired(key)"
             :min="propSchema.minimum"
             :max="propSchema.maximum"
@@ -129,6 +178,34 @@ const isRequired     = (key) => requiredFields.value.includes(key)
 
 function update(key, value) {
   emit('update:modelValue', { ...props.modelValue, [key]: value })
+}
+
+/** Keep the typed value in the shape the schema asks for; blank stays blank. */
+function coerce(schema, raw) {
+  if (raw === '') return ''
+  if (schema?.type === 'integer') return parseInt(raw, 10)
+  if (schema?.type === 'number') return parseFloat(raw)
+  return raw
+}
+
+// --- Array items ---
+const items = (key) => Array.isArray(props.modelValue[key]) ? props.modelValue[key] : []
+
+function setItem(key, idx, value) {
+  const next = [...items(key)]
+  next[idx] = value
+  update(key, next)
+}
+
+function addItem(key, itemSchema) {
+  const blank = itemSchema?.type === 'object' ? {}
+    : itemSchema?.type === 'boolean' ? false
+    : ''
+  update(key, [...items(key), blank])
+}
+
+function removeItem(key, idx) {
+  update(key, items(key).filter((_, i) => i !== idx))
 }
 
 // Raw JSON fallback
