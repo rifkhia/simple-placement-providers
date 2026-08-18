@@ -56,13 +56,16 @@ src/
 ├── api/
 │   ├── index.js          axios instance, response unwrapping, error normalization
 │   ├── placements.js      GET/POST/PUT/DELETE /api/v2/placements
-│   └── providers.js       GET /api/v2/providers
+│   └── providers.js       GET/POST/PUT/DELETE /api/v2/providers
 ├── components/
 │   ├── JsonSchemaForm.vue Recursive form generated from a JSON Schema
+│   ├── SchemaBuilder.vue  Recursive visual editor *for* a JSON Schema
 │   └── ConfirmModal.vue   Reusable confirm dialog
+├── utils/
+│   └── schema.js         JSON Schema ⇄ editable field tree conversion
 ├── views/
 │   ├── PlacementsView.vue List, search, create, edit, delete placements
-│   └── ProvidersView.vue  Read-only provider list + rules viewer
+│   └── ProvidersView.vue  List, search, create, edit, delete providers
 ├── App.vue               Sidebar shell + nav
 └── main.js               App bootstrap and routes
 ```
@@ -83,9 +86,44 @@ everything unpaginated.
 ### Schema-driven placement form
 
 Each provider carries a `rules` JSON Schema. When you pick a provider in the
-placement modal, `JsonSchemaForm` renders inputs for that schema —
-strings, numbers, booleans, enums (as selects), and nested objects (recursively).
-Changing the provider resets `provider_resources`, since the schema changed.
+placement modal, `JsonSchemaForm` renders inputs for that schema — strings,
+numbers, booleans, enums (as selects), arrays (as add/remove lists) and nested
+objects (recursively). Changing the provider resets `provider_resources`, since
+the schema changed.
+
+### Visual provider schema builder
+
+A provider's `rules` is stored as raw JSON, but hand-writing JSON Schema is a
+poor editing experience, so `ProvidersView` edits it as a list of properties
+instead. Each row is one property: **name**, **type** (string, integer, number,
+boolean, object, array), a **Mandatory** checkbox that drives the schema's
+`required` array, and — behind the chevron — a description and, for strings, a
+comma-separated list of allowed values that becomes an `enum` (and therefore a
+dropdown on the placement form). Object properties and arrays-of-objects nest
+another builder inside themselves, to any depth.
+
+`src/utils/schema.js` does the conversion both ways:
+
+| Function | Direction |
+|---|---|
+| `schemaToFields(schema)` | JSON Schema → ordered field nodes |
+| `fieldsToSchema(fields, extras)` | field nodes → JSON Schema |
+| `validateFields(fields)` | blank / duplicate property names |
+| `describeSchema(schema)` | `"3 properties · 1 required"` for the table |
+
+Two details worth knowing:
+
+- **Unknown keywords survive.** Anything the builder has no control for
+  (`pattern`, `minimum`, `format`, `$comment`, root-level `title`…) is parked on
+  the field's `extra` and merged back on save, so editing a provider never
+  silently drops a constraint the UI doesn't render.
+- **The JSON tab is the escape hatch.** The rules editor has a Builder/JSON
+  toggle over the same schema; switching tabs converts, and whichever tab is
+  active when you press Save is the one that defines the payload. Switching to
+  the builder with invalid JSON is refused rather than losing your text.
+
+Properties with a blank name are skipped when generating the schema, so a
+half-typed row never reaches the backend.
 
 ### Placement search
 
@@ -236,6 +274,9 @@ Handoff is the `<env>-latest` tag: the workflow moves it, Watchtower notices.
 
 ## Notes and limitations
 
-- Providers are read-only in this UI; they're managed elsewhere.
 - No test suite yet.
 - Placement page size is fixed at 20 (`pageSize` in `PlacementsView.vue`).
+- The provider list isn't paginated — it fetches everything and filters on the
+  client, same as placements.
+- Provider create/update/delete assume the backend exposes `POST`, `PUT` and
+  `DELETE` on `/api/v2/providers`, mirroring the placements endpoints.
